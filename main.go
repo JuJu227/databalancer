@@ -22,8 +22,8 @@ var (
 	cli = kingpin.New("databalancer", "Micro-service for ingesting logs and balancing them across database tables")
 
 	debug         = cli.Flag("debug", "Enable debug mode").Bool()
-	dbUsername    = cli.Flag("mysql_username", "The MySQL user account username").Default("dbuser").String()
-	dbPassword    = cli.Flag("mysql_password", "The MySQL user account password").Default("dbpassword").String()
+	dbUsername    = cli.Flag("mysql_username", "The MySQL user account username").Default("root").String() //dbuser
+	dbPassword    = cli.Flag("mysql_password", "The MySQL user account password").Default("").String()     //dbpassword
 	dbAddress     = cli.Flag("mysql_address", "The MySQL server address").Default("localhost:3306").String()
 	dbName        = cli.Flag("mysql_database", "The MySQL database to use").Default("databalancer").String()
 	serverAddress = cli.Flag("server_address", "The address and port to serve the local HTTP server").Default(":8080").String()
@@ -48,6 +48,10 @@ type IngestLogBody struct {
 	Family string                   `json:"family" binding:"required"`
 	Schema map[string]string        `json:"schema" binding:"required"`
 	Logs   []map[string]interface{} `json:"logs" binding:"required"`
+}
+
+type QueryBody struct {
+	SQL string `json:"sql_query" binding:"required"`
 }
 
 // IngestLog is an HTTP handler which ingests logs from other micro-services
@@ -169,6 +173,47 @@ func IngestLog(c *gin.Context) {
 		"message": "OK",
 	})
 }
+func QueryMagic(c *gin.Context) {
+	var body QueryBody
+	err := c.BindJSON(&body)
+	if err != nil {
+		logrus.WithError(err).Errorf("The request did not contain a correctly formatted JSON body")
+		return
+	}
+
+	fmt.Println(body.SQL)
+
+	rows, err := db.Raw(body.SQL).Rows()
+	defer rows.Close()
+	cols, _ := rows.Columns()
+	rawResult := make([][]byte, len(cols))
+	result := make([]string, len(cols))
+	dest := make([]interface{}, len(cols))
+	for i, _ := range rawResult {
+		dest[i] = &rawResult[i] // Put pointers to each string in the interface slice
+	}
+	var something []string
+	for rows.Next() {
+		err = rows.Scan(dest...)
+		if err != nil {
+			fmt.Println("Failed to scan row", err)
+			return
+		}
+
+		for i, raw := range rawResult {
+			if raw == nil {
+				result[i] = "\\N"
+			} else {
+				result[i] = string(raw)
+			}
+		}
+		something = append(something, ("{" + strings.Join(result, ",") + "}"))
+		fmt.Println(result)
+	}
+	c.JSON(http.StatusAccepted, gin.H{
+		"result": something,
+	})
+}
 
 func main() {
 	// Key variables are set as command-line flags
@@ -215,6 +260,7 @@ func main() {
 	r := gin.New()
 
 	r.PUT("/api/log", IngestLog)
+	r.PUT("/api/query", QueryMagic)
 
 	r.Run(*serverAddress)
 }
