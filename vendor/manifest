@@ -58,6 +58,14 @@
 			"notests": true
 		},
 		{
+			"importpath": "github.com/fatih/set",
+			"repository": "https://github.com/fatih/set",
+			"vcs": "git",
+			"revision": "27c40922c40b43fe04554d8223a402af3ea333f3",
+			"branch": "v0.1.1",
+			"notests": true
+		},
+		{
 			"importpath": "github.com/gin-gonic/gin",
 			"repository": "https://github.com/gin-gonic/gin",
 			"vcs": "git",

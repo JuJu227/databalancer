@@ -2,7 +2,7 @@ mysql:
   image: mysql:5.7.13
   environment:
     MYSQL_ROOT_PASSWORD: toor
-    MYSQL_DATABASE: databalancer
+    MYSQL_DATABASE: databalancer,databalancer2
     MYSQL_USER: dbuser
     MYSQL_PASSWORD: dbpassword
   ports:

@@ -3,12 +3,14 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 
 	"github.com/Sirupsen/logrus"
+	"github.com/fatih/set"
 	"github.com/gin-gonic/gin"
 	"github.com/jinzhu/gorm"
 	_ "github.com/jinzhu/gorm/dialects/mysql"
@@ -16,7 +18,14 @@ import (
 )
 
 // db is the global database connection object
-var db *gorm.DB
+//var db *gorm.DB
+type Shard struct {
+	DB       *gorm.DB
+	Families *set.Set
+	status   bool
+}
+
+var databases []Shard
 
 var (
 	cli = kingpin.New("databalancer", "Micro-service for ingesting logs and balancing them across database tables")
@@ -25,7 +34,7 @@ var (
 	dbUsername    = cli.Flag("mysql_username", "The MySQL user account username").Default("root").String() //dbuser
 	dbPassword    = cli.Flag("mysql_password", "The MySQL user account password").Default("").String()     //dbpassword
 	dbAddress     = cli.Flag("mysql_address", "The MySQL server address").Default("localhost:3306").String()
-	dbName        = cli.Flag("mysql_database", "The MySQL database to use").Default("databalancer").String()
+	dbName        = cli.Flag("mysql_databases", "The MySQL database to use").Default("databalancer,databalancer2").String()
 	serverAddress = cli.Flag("server_address", "The address and port to serve the local HTTP server").Default(":8080").String()
 )
 
@@ -54,6 +63,10 @@ type QueryBody struct {
 	SQL string `json:"sql_query" binding:"required"`
 }
 
+func Random() int {
+	return rand.Intn(len(databases))
+}
+
 // IngestLog is an HTTP handler which ingests logs from other micro-services
 func IngestLog(c *gin.Context) {
 	var body IngestLogBody
@@ -69,7 +82,16 @@ func IngestLog(c *gin.Context) {
 	logrus.Debugf("Received logs for the %s log family", body.Family)
 
 	//get existing family names
-	if !db.HasTable(body.Family) {
+	var sharder Shard
+	for _, shard := range databases {
+		if shard.DB.HasTable(body.Family) {
+			shard.Families.Add(body.Family)
+			sharder = shard
+		}
+	}
+
+	if !sharder.status {
+		sharder = databases[Random()]
 		createString := "create table " + body.Family + " ( "
 		for column, columnType := range body.Schema {
 			logrus.Debugf("Log values for the field %s of the %s log will be of type %s", column, body.Family, columnType)
@@ -81,7 +103,8 @@ func IngestLog(c *gin.Context) {
 			}
 		}
 		createString = createString + ")"
-		db.Exec(strings.Replace(createString, ",)", ")", 1))
+		sharder.DB.Exec(strings.Replace(createString, ",)", ")", 1))
+		sharder.Families.Add(body.Family)
 	}
 
 	for _, logEvent := range body.Logs {
@@ -135,7 +158,7 @@ func IngestLog(c *gin.Context) {
 			Log:    string(rawLogContent),
 		}
 
-		err = db.Create(&rawLog).Error
+		err = sharder.DB.Create(&rawLog).Error
 		if err != nil {
 			logrus.WithError(err).Errorln("Cold not store the log event in the database")
 
@@ -166,7 +189,7 @@ func IngestLog(c *gin.Context) {
 		insertList = append(insertList, (strings.Replace(insertColumn, ",)", ")", -1) + strings.Replace(insertValues, ",)", ")", -1)))
 	}
 	for _, val := range insertList {
-		db.Exec(val)
+		sharder.DB.Exec(val)
 	}
 
 	c.JSON(http.StatusOK, map[string]string{
@@ -175,44 +198,72 @@ func IngestLog(c *gin.Context) {
 }
 func QueryMagic(c *gin.Context) {
 	var body QueryBody
+
 	err := c.BindJSON(&body)
 	if err != nil {
 		logrus.WithError(err).Errorf("The request did not contain a correctly formatted JSON body")
 		return
 	}
-
-	fmt.Println(body.SQL)
-
-	rows, err := db.Raw(body.SQL).Rows()
-	defer rows.Close()
-	cols, _ := rows.Columns()
-	rawResult := make([][]byte, len(cols))
-	result := make([]string, len(cols))
-	dest := make([]interface{}, len(cols))
-	for i, _ := range rawResult {
-		dest[i] = &rawResult[i] // Put pointers to each string in the interface slice
-	}
-	var something []string
-	for rows.Next() {
-		err = rows.Scan(dest...)
-		if err != nil {
-			fmt.Println("Failed to scan row", err)
-			return
+	var sharder Shard
+	for _, shard := range databases {
+		rows, _ := shard.DB.Raw("show tables").Rows()
+		for rows.Next() {
+			val := ""
+			rows.Scan(&val)
+			shard.Families.Add(val)
 		}
-
-		for i, raw := range rawResult {
-			if raw == nil {
-				result[i] = "\\N"
-			} else {
-				result[i] = string(raw)
+	}
+	fmt.Println(databases[0].Families.List())
+	fmt.Println(databases[1].Families.List())
+LOOP:
+	for _, shard := range databases {
+		for _, x := range shard.Families.List() {
+			if strings.Contains(body.SQL, x.(string)) {
+				sharder = shard
+				fmt.Println(shard)
+				break LOOP
 			}
 		}
-		something = append(something, ("{" + strings.Join(result, ",") + "}"))
-		fmt.Println(result)
+
 	}
-	c.JSON(http.StatusAccepted, gin.H{
-		"result": something,
-	})
+	fmt.Println(sharder.status)
+
+	if sharder.status {
+
+		rows, err := sharder.DB.Raw(body.SQL).Rows()
+		if err != nil {
+			logrus.Warning(err)
+		}
+		defer rows.Close()
+		cols, _ := rows.Columns()
+		rawResult := make([][]byte, len(cols))
+		result := make([]string, len(cols))
+		dest := make([]interface{}, len(cols))
+		for i, _ := range rawResult {
+			dest[i] = &rawResult[i] // Put pointers to each string in the interface slice
+		}
+		var something []string
+		for rows.Next() {
+			err = rows.Scan(dest...)
+			if err != nil {
+				fmt.Println("Failed to scan row", err)
+				return
+			}
+
+			for i, raw := range rawResult {
+				if raw == nil {
+					result[i] = "\\N"
+				} else {
+					result[i] = string(raw)
+				}
+			}
+			something = append(something, ("{" + strings.Join(result, ",") + "}"))
+			fmt.Println(result)
+		}
+		c.JSON(http.StatusAccepted, gin.H{
+			"result": something,
+		})
+	}
 }
 
 func main() {
@@ -227,29 +278,35 @@ func main() {
 		// Enable debug logging
 		logrus.SetLevel(logrus.DebugLevel)
 	}
+	databasesNames := strings.Split(fmt.Sprintf("%s", *dbName), ",")
 
 	// Using data from command-line parameters, we create a MySQL connection
 	// string
-	connectionString := fmt.Sprintf(
-		"%s:%s@(%s)/%s?charset=utf8&parseTime=True&loc=Local",
-		*dbUsername,
-		*dbPassword,
-		*dbAddress,
-		*dbName,
-	)
-
-	// Using our connection string, we attempt to establish a MySQL connection
-	db, err = gorm.Open("mysql", connectionString)
-
-	if err != nil {
-		logrus.WithError(err).Fatal("Could not establish a connection to the database")
+	for _, val := range databasesNames {
+		connectionString := fmt.Sprintf(
+			"%s:%s@(%s)/%s?charset=utf8&parseTime=True&loc=Local",
+			*dbUsername,
+			*dbPassword,
+			*dbAddress,
+			val,
+		)
+		shard := Shard{}
+		db, err := gorm.Open("mysql", connectionString)
+		if err != nil {
+			logrus.WithError(err).Fatal("Could not establish a connection to the database")
+		}
+		shard.DB = db
+		shard.Families = set.New()
+		shard.status = true
+		logrus.Infof("Connected to MySQL as %s at %s", *dbUsername, *dbAddress)
+		databases = append(databases, shard)
 	}
 
-	logrus.Infof("Connected to MySQL as %s at %s", *dbUsername, *dbAddress)
-
-	for _, table := range databaseTables {
-		db.DropTableIfExists(table)
-		db.CreateTable(table)
+	for _, shard := range databases {
+		for _, table := range databaseTables {
+			shard.DB.DropTableIfExists(table)
+			shard.DB.CreateTable(table)
+		}
 	}
 
 	logrus.Infof("Starting HTTP server on %s", *serverAddress)
