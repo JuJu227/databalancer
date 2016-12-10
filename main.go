@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/fatih/set"
@@ -15,6 +16,19 @@ import (
 	"github.com/jinzhu/gorm"
 	_ "github.com/jinzhu/gorm/dialects/mysql"
 	"gopkg.in/alecthomas/kingpin.v2"
+)
+
+var (
+	cli = kingpin.New("databalancer", "Micro-service for ingesting logs and balancing them across database tables")
+
+	debug         = cli.Flag("debug", "Enable debug mode").Bool()
+	dbUsername    = cli.Flag("mysql_username", "The MySQL user account username").Default("dbuser").String()
+	dbPassword    = cli.Flag("mysql_password", "The MySQL user account password").Default("dbpassword").String()
+	dbAddress     = cli.Flag("mysql_address", "The MySQL server address").Default("localhost:3306").String()
+	dbName        = cli.Flag("mysql_databases", "The MySQL database to use").Default("databalancer,databalancer2").String()
+	serverAddress = cli.Flag("server_address", "The address and port to serve the local HTTP server").Default(":8080").String()
+
+	Purge = cli.Flag("purge", "Would you like to purge old data?").Short('p').Bool()
 )
 
 // db is the global database connection object
@@ -26,17 +40,6 @@ type Shard struct {
 }
 
 var databases []Shard
-
-var (
-	cli = kingpin.New("databalancer", "Micro-service for ingesting logs and balancing them across database tables")
-
-	debug         = cli.Flag("debug", "Enable debug mode").Bool()
-	dbUsername    = cli.Flag("mysql_username", "The MySQL user account username").Default("root").String() //dbuser
-	dbPassword    = cli.Flag("mysql_password", "The MySQL user account password").Default("").String()     //dbpassword
-	dbAddress     = cli.Flag("mysql_address", "The MySQL server address").Default("localhost:3306").String()
-	dbName        = cli.Flag("mysql_databases", "The MySQL database to use").Default("databalancer,databalancer2").String()
-	serverAddress = cli.Flag("server_address", "The address and port to serve the local HTTP server").Default(":8080").String()
-)
 
 // RawLog is an example struct which is used to store raw logs in the database
 type RawLog struct {
@@ -93,6 +96,7 @@ func IngestLog(c *gin.Context) {
 	if !sharder.status {
 		sharder = databases[Random()]
 		createString := "create table " + body.Family + " ( "
+		createString = createString + " id INT NOT NULL AUTO_INCREMENT, "
 		for column, columnType := range body.Schema {
 			logrus.Debugf("Log values for the field %s of the %s log will be of type %s", column, body.Family, columnType)
 			switch columnType {
@@ -102,7 +106,8 @@ func IngestLog(c *gin.Context) {
 				createString = createString + " " + column + " INT,"
 			}
 		}
-		createString = createString + ")"
+		createString = createString + " time TIMESTAMP, "
+		createString = createString + " PRIMARY KEY (id) , KEY (id) )"
 		sharder.DB.Exec(strings.Replace(createString, ",)", ")", 1))
 		sharder.Families.Add(body.Family)
 	}
@@ -190,6 +195,7 @@ func IngestLog(c *gin.Context) {
 	}
 	for _, val := range insertList {
 		sharder.DB.Exec(val)
+		logrus.Info("Just saved to the record")
 	}
 
 	c.JSON(http.StatusOK, map[string]string{
@@ -205,28 +211,18 @@ func QueryMagic(c *gin.Context) {
 		return
 	}
 	var sharder Shard
-	for _, shard := range databases {
-		rows, _ := shard.DB.Raw("show tables").Rows()
-		for rows.Next() {
-			val := ""
-			rows.Scan(&val)
-			shard.Families.Add(val)
-		}
-	}
-	fmt.Println(databases[0].Families.List())
-	fmt.Println(databases[1].Families.List())
+	findExisting()
+	//We have to break out of the nested loop something how
 LOOP:
 	for _, shard := range databases {
 		for _, x := range shard.Families.List() {
 			if strings.Contains(body.SQL, x.(string)) {
 				sharder = shard
-				fmt.Println(shard)
 				break LOOP
 			}
 		}
 
 	}
-	fmt.Println(sharder.status)
 
 	if sharder.status {
 
@@ -246,7 +242,7 @@ LOOP:
 		for rows.Next() {
 			err = rows.Scan(dest...)
 			if err != nil {
-				fmt.Println("Failed to scan row", err)
+				logrus.Errorf("Failed to scan row %#v", err)
 				return
 			}
 
@@ -263,21 +259,14 @@ LOOP:
 		c.JSON(http.StatusAccepted, gin.H{
 			"result": something,
 		})
+		return
 	}
+	c.JSON(http.StatusNotFound, map[string]string{
+		"message": "Sorry wasn't able to locate a family that matches requested",
+	})
 }
 
-func main() {
-	// Key variables are set as command-line flags
-	_, err := cli.Parse(os.Args[1:])
-
-	if err != nil {
-		logrus.WithError(err).Fatal("Error parsing command-line arguments")
-	}
-
-	if *debug {
-		// Enable debug logging
-		logrus.SetLevel(logrus.DebugLevel)
-	}
+func loadDB() {
 	databasesNames := strings.Split(fmt.Sprintf("%s", *dbName), ",")
 
 	// Using data from command-line parameters, we create a MySQL connection
@@ -297,16 +286,64 @@ func main() {
 		}
 		shard.DB = db
 		shard.Families = set.New()
-		shard.status = true
+		shard.status = true //Because there's not sane way to compare initialize and un-initialized structs
 		logrus.Infof("Connected to MySQL as %s at %s", *dbUsername, *dbAddress)
 		databases = append(databases, shard)
 	}
 
+	//clean update content
 	for _, shard := range databases {
 		for _, table := range databaseTables {
 			shard.DB.DropTableIfExists(table)
 			shard.DB.CreateTable(table)
 		}
+	}
+}
+
+func findExisting() {
+	for _, shard := range databases {
+		rows, _ := shard.DB.Raw("show tables").Rows()
+		for rows.Next() {
+			val := ""
+			rows.Scan(&val)
+			shard.Families.Add(val)
+		}
+	}
+}
+
+//Purge data that's three days old
+func PurgeOld() {
+	for {
+		t := time.Now().AddDate(0, 0, 3).Format("2016-12-10 00:26:05")
+		for _, shard := range databases {
+			for _, table := range shard.Families.List() {
+				shard.DB.Exec("DELETE FROM " + table.(string) + " WHERE time < " + t)
+			}
+		}
+		//This will only run once daily
+		time.Sleep(time.Hour * 24)
+	}
+}
+
+func main() {
+	// Key variables are set as command-line flags
+	_, err := cli.Parse(os.Args[1:])
+
+	if err != nil {
+		logrus.WithError(err).Fatal("Error parsing command-line arguments")
+	}
+
+	if *debug {
+		// Enable debug logging
+		logrus.SetLevel(logrus.DebugLevel)
+	}
+
+	//Databases access
+	loadDB()
+
+	if *Purge {
+		//Non blocking situation here, throw into its own goroutine
+		go PurgeOld()
 	}
 
 	logrus.Infof("Starting HTTP server on %s", *serverAddress)
