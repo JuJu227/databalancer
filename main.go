@@ -22,8 +22,8 @@ var (
 	cli = kingpin.New("databalancer", "Micro-service for ingesting logs and balancing them across database tables")
 
 	debug         = cli.Flag("debug", "Enable debug mode").Bool()
-	dbUsername    = cli.Flag("mysql_username", "The MySQL user account username").Default("dbuser").String()
-	dbPassword    = cli.Flag("mysql_password", "The MySQL user account password").Default("dbpassword").String()
+	dbUsername    = cli.Flag("mysql_username", "The MySQL user account username").Default("dbuser").String()     //dbuser
+	dbPassword    = cli.Flag("mysql_password", "The MySQL user account password").Default("dbpassword").String() //dbpassword
 	dbAddress     = cli.Flag("mysql_address", "The MySQL server address").Default("localhost:3306").String()
 	dbName        = cli.Flag("mysql_databases", "The MySQL database to use").Default("databalancer,databalancer2").String()
 	serverAddress = cli.Flag("server_address", "The address and port to serve the local HTTP server").Default(":8080").String()
@@ -204,17 +204,27 @@ func QueryMagic(c *gin.Context) {
 	var sharder Shard
 	findExisting()
 	//We have to break out of the nested loop something how
+	targetTable := strings.Split(body.SQL, "from ")
+	if len(targetTable) != 2 {
+		c.JSON(http.StatusNotFound, map[string]string{
+			"message": "you have a malformed sql query",
+		})
+		return
+	}
+
+	subString := targetTable[1]
+	tableName := strings.Split(subString, " where")[0]
+
 LOOP:
 	for _, shard := range databases {
 		for _, x := range shard.Families.List() {
-			if strings.Contains(body.SQL, x.(string)) {
+			if strings.TrimSpace(tableName) == strings.TrimSpace(x.(string)) {
 				sharder = shard
 				break LOOP
 			}
 		}
 
 	}
-
 	if sharder.status {
 
 		rows, err := sharder.DB.Raw(body.SQL).Rows()
