@@ -27,7 +27,7 @@ var (
 	dbAddress     = cli.Flag("mysql_address", "The MySQL server address").Default("localhost:3306").String()
 	dbName        = cli.Flag("mysql_databases", "The MySQL database to use").Default("databalancer,databalancer2").String()
 	serverAddress = cli.Flag("server_address", "The address and port to serve the local HTTP server").Default(":8080").String()
-	Purge         = cli.Flag("purge", "Would you like to purge old data?").Short('p').Bool()
+	purge         = cli.Flag("purge", "Would you like to purge old data?").Short('p').Bool()
 )
 
 // db is the global database connection object
@@ -344,7 +344,7 @@ func main() {
 	//Databases access
 	loadDB()
 
-	if *Purge {
+	if *purge {
 		//Non blocking situation here, throw into its own goroutine
 		go PurgeOld()
 	}
