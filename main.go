@@ -22,13 +22,12 @@ var (
 	cli = kingpin.New("databalancer", "Micro-service for ingesting logs and balancing them across database tables")
 
 	debug         = cli.Flag("debug", "Enable debug mode").Bool()
-	dbUsername    = cli.Flag("mysql_username", "The MySQL user account username").Default("dbuser").String()
-	dbPassword    = cli.Flag("mysql_password", "The MySQL user account password").Default("dbpassword").String()
+	dbUsername    = cli.Flag("mysql_username", "The MySQL user account username").Default("dbuser").String()     //dbuser
+	dbPassword    = cli.Flag("mysql_password", "The MySQL user account password").Default("dbpassword").String() //dbpassword
 	dbAddress     = cli.Flag("mysql_address", "The MySQL server address").Default("localhost:3306").String()
 	dbName        = cli.Flag("mysql_databases", "The MySQL database to use").Default("databalancer,databalancer2").String()
 	serverAddress = cli.Flag("server_address", "The address and port to serve the local HTTP server").Default(":8080").String()
-
-	Purge = cli.Flag("purge", "Would you like to purge old data?").Short('p').Bool()
+	Purge         = cli.Flag("purge", "Would you like to purge old data?").Short('p').Bool()
 )
 
 // db is the global database connection object
@@ -66,8 +65,34 @@ type QueryBody struct {
 	SQL string `json:"sql_query" binding:"required"`
 }
 
-func Random() int {
-	return rand.Intn(len(databases))
+func findFamily(familyName string) (sharder Shard) {
+	for _, shard := range databases {
+		if shard.DB.HasTable(familyName) {
+			shard.Families.Add(familyName)
+			return shard
+		}
+	}
+	return sharder
+}
+
+func createNewTable(body IngestLogBody) (sharder Shard) {
+	sharder = databases[rand.Intn(len(databases))]
+	createString := "create table " + body.Family + " ( "
+	createString = createString + " id INT NOT NULL AUTO_INCREMENT, "
+	for column, columnType := range body.Schema {
+		logrus.Debugf("Log values for the field %s of the %s log will be of type %s", column, body.Family, columnType)
+		switch columnType {
+		case "string":
+			createString = createString + " " + column + " varchar(255),"
+		case "int":
+			createString = createString + " " + column + " INT,"
+		}
+	}
+	createString = createString + " time TIMESTAMP, "
+	createString = createString + " PRIMARY KEY (id) , KEY (id) )"
+	sharder.DB.Exec(strings.Replace(createString, ",)", ")", 1))
+	sharder.Families.Add(body.Family)
+	return sharder
 }
 
 // IngestLog is an HTTP handler which ingests logs from other micro-services
@@ -85,31 +110,10 @@ func IngestLog(c *gin.Context) {
 	logrus.Debugf("Received logs for the %s log family", body.Family)
 
 	//get existing family names
-	var sharder Shard
-	for _, shard := range databases {
-		if shard.DB.HasTable(body.Family) {
-			shard.Families.Add(body.Family)
-			sharder = shard
-		}
-	}
+	sharder := findFamily(body.Family)
 
 	if !sharder.status {
-		sharder = databases[Random()]
-		createString := "create table " + body.Family + " ( "
-		createString = createString + " id INT NOT NULL AUTO_INCREMENT, "
-		for column, columnType := range body.Schema {
-			logrus.Debugf("Log values for the field %s of the %s log will be of type %s", column, body.Family, columnType)
-			switch columnType {
-			case "string":
-				createString = createString + " " + column + " varchar(255),"
-			case "int":
-				createString = createString + " " + column + " INT,"
-			}
-		}
-		createString = createString + " time TIMESTAMP, "
-		createString = createString + " PRIMARY KEY (id) , KEY (id) )"
-		sharder.DB.Exec(strings.Replace(createString, ",)", ")", 1))
-		sharder.Families.Add(body.Family)
+		sharder = createNewTable(body)
 	}
 
 	for _, logEvent := range body.Logs {
@@ -254,7 +258,6 @@ LOOP:
 				}
 			}
 			something = append(something, ("{" + strings.Join(result, ",") + "}"))
-			fmt.Println(result)
 		}
 		c.JSON(http.StatusAccepted, gin.H{
 			"result": something,
@@ -317,7 +320,7 @@ func PurgeOld() {
 		t := time.Now().AddDate(0, 0, 3).Format("2016-12-10 00:26:05")
 		for _, shard := range databases {
 			for _, table := range shard.Families.List() {
-				shard.DB.Exec("DELETE FROM " + table.(string) + " WHERE time < " + t)
+				shard.DB.Exec(fmt.Sprintf("DELETE FROM %s WHERE time < %s", table.(string), t))
 			}
 		}
 		//This will only run once daily
