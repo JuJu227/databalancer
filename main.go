@@ -22,8 +22,8 @@ var (
 	cli = kingpin.New("databalancer", "Micro-service for ingesting logs and balancing them across database tables")
 
 	debug         = cli.Flag("debug", "Enable debug mode").Bool()
-	dbUsername    = cli.Flag("mysql_username", "The MySQL user account username").Default("dbuser").String()     //dbuser
-	dbPassword    = cli.Flag("mysql_password", "The MySQL user account password").Default("dbpassword").String() //dbpassword
+	dbUsername    = cli.Flag("mysql_username", "The MySQL user account username").Default("root").String() //dbuser
+	dbPassword    = cli.Flag("mysql_password", "The MySQL user account password").Default("").String()     //dbpassword
 	dbAddress     = cli.Flag("mysql_address", "The MySQL server address").Default("localhost:3306").String()
 	dbName        = cli.Flag("mysql_databases", "The MySQL database to use").Default("databalancer,databalancer2").String()
 	serverAddress = cli.Flag("server_address", "The address and port to serve the local HTTP server").Default(":8080").String()
@@ -118,8 +118,11 @@ func IngestLog(c *gin.Context) {
 
 	for _, logEvent := range body.Logs {
 		logrus.Debugf("Handling a new log event for the %s log family", body.Family)
+		insertColumn := "INSERT INTO " + body.Family + " ( "
+		insertValues := "Values ("
 
 		for field, value := range logEvent {
+			insertColumn = insertColumn + field + ","
 			columnType, ok := body.Schema[field]
 
 			if !ok {
@@ -137,8 +140,10 @@ func IngestLog(c *gin.Context) {
 			switch columnType {
 			case "string":
 				logrus.Debugf("The value of the %s field in the %s log event is %s", field, body.Family, value.(string))
+				insertValues = insertValues + `"` + value.(string) + `",`
 			case "int":
 				logrus.Debugf("The value of the %s field in the %s log event is %d", field, body.Family, int(value.(float64)))
+				insertValues = insertValues + strconv.Itoa(int(value.(float64))) + ","
 			default:
 
 				c.JSON(http.StatusBadRequest, map[string]string{
@@ -148,6 +153,10 @@ func IngestLog(c *gin.Context) {
 				return
 			}
 		}
+
+		insertValues = insertValues + ")"
+		insertColumn = insertColumn + ")"
+		bigInsert := strings.Replace(insertColumn, ",)", ")", -1) + strings.Replace(insertValues, ",)", ")", -1)
 
 		// Marshal the log event back into JSON to store it in the database
 		rawLogContent, err := json.Marshal(logEvent)
@@ -177,31 +186,9 @@ func IngestLog(c *gin.Context) {
 
 			return
 		}
+		sharder.DB.Exec(bigInsert)
 
 	}
-	//Hacky mess but it works
-	insertList := make([]string, len(body.Logs))
-	for _, event := range body.Logs {
-		insertColumn := "INSERT INTO " + body.Family + " ( "
-		insertValues := "Values ("
-		for field, value := range event {
-			insertColumn = insertColumn + field + ","
-			switch value.(type) {
-			case string:
-				insertValues = insertValues + `"` + value.(string) + `",`
-			case float64:
-				insertValues = insertValues + strconv.Itoa(int(value.(float64))) + ","
-			}
-		}
-		insertValues = insertValues + ")"
-		insertColumn = insertColumn + ")"
-		insertList = append(insertList, (strings.Replace(insertColumn, ",)", ")", -1) + strings.Replace(insertValues, ",)", ")", -1)))
-	}
-	for _, val := range insertList {
-		sharder.DB.Exec(val)
-		logrus.Info("Just saved to the record")
-	}
-
 	c.JSON(http.StatusOK, map[string]string{
 		"message": "OK",
 	})
