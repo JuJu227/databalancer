@@ -21,8 +21,8 @@ var (
 	cli = kingpin.New("databalancer", "Micro-service for ingesting logs and balancing them across database tables")
 
 	debug         = cli.Flag("debug", "Enable debug mode").Bool()
-	dbUsername    = cli.Flag("mysql_username", "The MySQL user account username").Default("dbuser").String()     //dbuser
-	dbPassword    = cli.Flag("mysql_password", "The MySQL user account password").Default("dbpassword").String() //dbpassword
+	dbUsername    = cli.Flag("mysql_username", "The MySQL user account username").Default("root").String() //dbuser
+	dbPassword    = cli.Flag("mysql_password", "The MySQL user account password").Default("").String()     //dbpassword
 	dbAddress     = cli.Flag("mysql_address", "The MySQL server address").Default("localhost:3306").String()
 	dbName        = cli.Flag("mysql_databases", "The MySQL database to use").Default("databalancer,databalancer2").String()
 	serverAddress = cli.Flag("server_address", "The address and port to serve the local HTTP server").Default(":8080").String()
@@ -62,6 +62,10 @@ type IngestLogBody struct {
 
 type QueryBody struct {
 	SQL string `json:"sql_query" binding:"required"`
+}
+type PurgeOpt struct {
+	Family string `json:"family" binding:"required"`
+	Date   string `json:"date" binding:"required"`
 }
 
 func findFamily(familyName string) (sharder Shard) {
@@ -320,10 +324,10 @@ func findExisting() {
 	}
 }
 
-//Purge data that's three days old
+//Purge data that's a week old
 func PurgeOld() {
 	for {
-		t := time.Now().AddDate(0, 0, 3).Format("2016-12-10 00:26:05")
+		t := time.Now().AddDate(0, 0, -7).Format("2016-12-10 00:26:05")
 		for _, shard := range databases {
 			for _, table := range shard.Families.List() {
 				shard.DB.Exec(fmt.Sprintf("DELETE FROM %s WHERE time < %s", table.(string), t))
@@ -332,6 +336,30 @@ func PurgeOld() {
 		//This will only run once daily
 		time.Sleep(time.Hour * 24)
 	}
+}
+
+func PurgeOptions(c *gin.Context) {
+	var body PurgeOpt
+	err := c.BindJSON(&body)
+	if err != nil {
+		logrus.WithError(err).Errorf("The request did not contain a correctly formatted JSON body")
+		return
+	}
+	findExisting()
+	for _, shard := range databases {
+		for _, name := range shard.Families.List() {
+			if strings.TrimSpace(body.Family) == strings.TrimSpace(name.(string)) {
+				builtTime := "STR_TO_DATE('" + body.Date + "', '%d/%m/%Y %H:%i:%s')"
+				output := fmt.Sprintf("DELETE FROM %s WHERE time < %s", body.Family, builtTime)
+				shard.DB.Exec(output)
+				c.JSON(http.StatusAccepted, gin.H{
+					"message": fmt.Sprintf("All data in family %s was deleted up to %s", body.Family, body.Date),
+				})
+				return
+			}
+		}
+	}
+
 }
 
 func main() {
@@ -364,6 +392,7 @@ func main() {
 
 	r.PUT("/api/log", IngestLog)
 	r.PUT("/api/query", QueryMagic)
+	r.PUT("/api/purge", PurgeOptions)
 
 	r.Run(*serverAddress)
 }
