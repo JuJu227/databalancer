@@ -21,8 +21,8 @@ var (
 	cli = kingpin.New("databalancer", "Micro-service for ingesting logs and balancing them across database tables")
 
 	debug         = cli.Flag("debug", "Enable debug mode").Bool()
-	dbUsername    = cli.Flag("mysql_username", "The MySQL user account username").Default("root").String() //dbuser
-	dbPassword    = cli.Flag("mysql_password", "The MySQL user account password").Default("").String()     //dbpassword
+	dbUsername    = cli.Flag("mysql_username", "The MySQL user account username").Default("dbuser").String()     //dbuser
+	dbPassword    = cli.Flag("mysql_password", "The MySQL user account password").Default("dbpassword").String() //dbpassword
 	dbAddress     = cli.Flag("mysql_address", "The MySQL server address").Default("localhost:3306").String()
 	dbName        = cli.Flag("mysql_databases", "The MySQL database to use").Default("databalancer,databalancer2").String()
 	serverAddress = cli.Flag("server_address", "The address and port to serve the local HTTP server").Default(":8080").String()
