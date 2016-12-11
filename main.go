@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"math/rand"
 	"net/http"
 	"os"
 	"strconv"
@@ -75,8 +74,22 @@ func findFamily(familyName string) (sharder Shard) {
 	return sharder
 }
 
+//So, let's distribute these tables a tad better
+func evenShuffle() (sharder Shard) {
+	findExisting()
+	smallest := databases[0].Families.Size()
+	sharder = databases[0]
+	for _, shard := range databases {
+		if shard.Families.Size() < smallest {
+			smallest = shard.Families.Size()
+			sharder = shard
+		}
+	}
+	return sharder
+}
+
 func createNewTable(body IngestLogBody) (sharder Shard) {
-	sharder = databases[rand.Intn(len(databases))]
+	sharder = evenShuffle()
 	createString := "create table " + body.Family + " ( "
 	createString = createString + " id INT NOT NULL AUTO_INCREMENT, "
 	for column, columnType := range body.Schema {
@@ -100,7 +113,6 @@ func IngestLog(c *gin.Context) {
 	var body IngestLogBody
 
 	err := c.BindJSON(&body)
-
 	if err != nil {
 		logrus.WithError(err).Errorf("The request did not contain a correctly formatted JSON body")
 
@@ -145,7 +157,6 @@ func IngestLog(c *gin.Context) {
 				logrus.Debugf("The value of the %s field in the %s log event is %d", field, body.Family, int(value.(float64)))
 				insertValues = insertValues + strconv.Itoa(int(value.(float64))) + ","
 			default:
-
 				c.JSON(http.StatusBadRequest, map[string]string{
 					"message": fmt.Sprintf("Unsupported data type in %s log for the field %s: %s", body.Family, field, columnType),
 				})
@@ -163,11 +174,9 @@ func IngestLog(c *gin.Context) {
 
 		if err != nil {
 			logrus.WithError(err).Errorln("Could not marshal the log event into JSON")
-
 			c.JSON(http.StatusInternalServerError, map[string]string{
 				"message": "JSON error",
 			})
-
 			return
 		}
 
