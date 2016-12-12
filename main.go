@@ -23,8 +23,8 @@ var (
 	debug         = cli.Flag("debug", "Enable debug mode").Bool()
 	dbUsername    = cli.Flag("mysql_username", "The MySQL user account username").Default("dbuser").String()     //dbuser
 	dbPassword    = cli.Flag("mysql_password", "The MySQL user account password").Default("dbpassword").String() //dbpassword
-	dbAddress     = cli.Flag("mysql_address", "The MySQL server address").Default("localhost:3306").String()
-	dbName        = cli.Flag("mysql_databases", "The MySQL database to use").Default("databalancer,databalancer2").String()
+	dbAddress     = cli.Flag("mysql_address", "The MySQL server addresses Ex. 'mysqlserverA:3306,mysqlservicerB:3306'").Default("localhost:3306").String()
+	dbName        = cli.Flag("mysql_databases", "The MySQL database to use Ex. 'dbA:3306,dbB:3306'").Default("databalancer,databalancer2").String()
 	serverAddress = cli.Flag("server_address", "The address and port to serve the local HTTP server").Default(":8080").String()
 	purge         = cli.Flag("purge", "Would you like to purge old data?").Short('p').Bool()
 )
@@ -281,27 +281,36 @@ LOOP:
 
 func loadDB() {
 	databasesNames := strings.Split(fmt.Sprintf("%s", *dbName), ",")
-
+	databasesAddress := strings.Split(fmt.Sprintf("%s", *dbAddress), ",")
 	// Using data from command-line parameters, we create a MySQL connection
 	// string
-	for _, val := range databasesNames {
-		connectionString := fmt.Sprintf(
-			"%s:%s@(%s)/%s?charset=utf8&parseTime=True&loc=Local",
-			*dbUsername,
-			*dbPassword,
-			*dbAddress,
-			val,
-		)
-		shard := Shard{}
-		db, err := gorm.Open("mysql", connectionString)
-		if err != nil {
-			logrus.WithError(err).Fatal("Could not establish a connection to the database")
+
+	for _, address := range databasesAddress {
+		for _, val := range databasesNames {
+			connectionString := fmt.Sprintf(
+				"%s:%s@(%s)/%s?charset=utf8&parseTime=True&loc=Local",
+				*dbUsername,
+				*dbPassword,
+				address,
+				val,
+			)
+			shard := Shard{}
+			db, err := gorm.Open("mysql", connectionString)
+			if err != nil {
+				logrus.WithError(err).Warning("Could not establish a connection to the databases")
+				continue
+			}
+			shard.DB = db
+			shard.Families = set.New()
+			shard.status = true //Because there's not sane way to compare initialize and un-initialized structs
+			logrus.Infof("Connected to MySQL as %s at %s", *dbUsername, *dbAddress)
+			databases = append(databases, shard)
 		}
-		shard.DB = db
-		shard.Families = set.New()
-		shard.status = true //Because there's not sane way to compare initialize and un-initialized structs
-		logrus.Infof("Connected to MySQL as %s at %s", *dbUsername, *dbAddress)
-		databases = append(databases, shard)
+	}
+
+	if len(databases) == 0 {
+		logrus.Fatal("Could not establish a connection to any of the databases you configured")
+
 	}
 
 	//clean update content
