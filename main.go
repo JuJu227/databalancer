@@ -267,7 +267,8 @@ LOOP:
 					result[i] = string(raw)
 				}
 			}
-			something = append(something, ("{" + strings.Join(result, ",") + "}"))
+			marResult, _ := json.Marshal(result)
+			something = append(something, string(marResult))
 		}
 		c.JSON(http.StatusAccepted, gin.H{
 			"result": something,
@@ -347,6 +348,7 @@ func PurgeOld() {
 	}
 }
 
+//Purging handler
 func PurgeOptions(c *gin.Context) {
 	var body PurgeOpt
 	err := c.BindJSON(&body)
