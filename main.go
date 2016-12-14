@@ -21,8 +21,8 @@ var (
 	cli = kingpin.New("databalancer", "Micro-service for ingesting logs and balancing them across database tables")
 
 	debug         = cli.Flag("debug", "Enable debug mode").Bool()
-	dbUsername    = cli.Flag("mysql_username", "The MySQL user account username").Default("dbuser").String()     //dbuser
-	dbPassword    = cli.Flag("mysql_password", "The MySQL user account password").Default("dbpassword").String() //dbpassword
+	dbUsername    = cli.Flag("mysql_username", "The MySQL user account username").Default("root").String() //dbuser
+	dbPassword    = cli.Flag("mysql_password", "The MySQL user account password").Default("").String()     //dbpassword
 	dbAddress     = cli.Flag("mysql_address", "The MySQL server addresses Ex. 'mysqlserverA:3306,mysqlservicerB:3306'").Default("localhost:3306").String()
 	dbName        = cli.Flag("mysql_databases", "The MySQL database to use Ex. 'dbA:3306,dbB:3306'").Default("databalancer,databalancer2").String()
 	serverAddress = cli.Flag("server_address", "The address and port to serve the local HTTP server").Default(":8080").String()
@@ -247,12 +247,12 @@ LOOP:
 		defer rows.Close()
 		cols, _ := rows.Columns()
 		rawResult := make([][]byte, len(cols))
-		result := make([]string, len(cols))
+		result := make([]interface{}, len(cols))
 		dest := make([]interface{}, len(cols))
 		for i, _ := range rawResult {
 			dest[i] = &rawResult[i] // Put pointers to each string in the interface slice
 		}
-		var something []string
+		var something []interface{}
 		for rows.Next() {
 			err = rows.Scan(dest...)
 			if err != nil {
@@ -264,11 +264,14 @@ LOOP:
 				if raw == nil {
 					result[i] = "\\N"
 				} else {
-					result[i] = string(raw)
+					if x, err := strconv.Atoi(string(raw)); err != nil {
+						result[i] = string(raw)
+					} else {
+						result[i] = x
+					}
 				}
 			}
-			marResult, _ := json.Marshal(result)
-			something = append(something, string(marResult))
+			something = append(something, result)
 		}
 		c.JSON(http.StatusAccepted, gin.H{
 			"result": something,
